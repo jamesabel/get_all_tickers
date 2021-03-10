@@ -1,5 +1,4 @@
 import pandas as pd
-from enum import Enum
 import io
 import requests
 import json
