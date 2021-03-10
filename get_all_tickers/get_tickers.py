@@ -2,6 +2,8 @@ import pandas as pd
 from enum import Enum
 import io
 import requests
+import json
+
 
 _EXCHANGE_LIST = ['nyse', 'nasdaq', 'amex']
 
@@ -13,7 +15,7 @@ _SECTORS_LIST = set(['Consumer Non-Durables', 'Capital Goods', 'Health Care',
 
 # headers and params used to bypass NASDAQ's anti-scraping mechanism in function __exchange2df
 headers = {
-    'authority': 'old.nasdaq.com',
+    'authority': 'nasdaq.com',
     'upgrade-insecure-requests': '1',
     'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36',
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
@@ -28,21 +30,22 @@ headers = {
 
 def params(exchange):
     return (
-        ('letter', '0'),
         ('exchange', exchange),
-        ('render', 'download'),
+        ('download', 'true'),
+        ('tableonly', 'true'),
+
     )
 
 def params_region(region):
     return (
-        ('letter', '0'),
         ('region', region),
-        ('render', 'download'),
+        ('download', 'true'),
+        ('tableonly', 'true'),
     )
 
 # I know it's weird to have Sectors as constants, yet the Regions as enums, but
 # it makes the most sense to me
-class Region(Enum):
+class Region:
     AFRICA = 'AFRICA'
     EUROPE = 'EUROPE'
     ASIA = 'ASIA'
@@ -91,82 +94,79 @@ def get_biggest_n_tickers(top_n, sectors=None):
         temp = __exchange2df(exchange)
         df = pd.concat([df, temp])
         
-    df = df.dropna(subset={'MarketCap'})
-    df = df[~df['Symbol'].str.contains("\.|\^")]
+    df = df.dropna(subset={'marketCap'})
+    df = df[~df['symbol'].str.contains("\.|\^")]
 
     if sectors is not None:
         if isinstance(sectors, str):
             sectors = [sectors]
         if not _SECTORS_LIST.issuperset(set(sectors)):
             raise ValueError('Some sectors included are invalid')
-        sector_filter = df['Sector'].apply(lambda x: x in sectors)
+        sector_filter = df['sector'].apply(lambda x: x in sectors)
         df = df[sector_filter]
 
     def cust_filter(mkt_cap):
-        if 'M' in mkt_cap:
-            return float(mkt_cap[1:-1])
-        elif 'B' in mkt_cap:
-            return float(mkt_cap[1:-1]) * 1000
-        else:
-            return float(mkt_cap[1:]) / 1e6
-    df['MarketCap'] = df['MarketCap'].apply(cust_filter)
+        if not mkt_cap:
+            return float(0.0)
+        return float(mkt_cap) / 1e6
+    df['marketCap'] = df['marketCap'].apply(cust_filter)
 
-    df = df.sort_values('MarketCap', ascending=False)
+    df = df.sort_values('marketCap', ascending=False)
     if top_n > len(df):
         raise ValueError('Not enough companies, please specify a smaller top_n')
 
-    return df.iloc[:top_n]['Symbol'].tolist()
+    return df.iloc[:top_n]['symbol'].tolist()
 
 
 def get_tickers_by_region(region):
-    if region in Region:
-        response = requests.get('https://old.nasdaq.com/screening/companies-by-name.aspx', headers=headers,
-                                params=params_region(region))
-        data = io.StringIO(response.text)
-        df = pd.read_csv(data, sep=",")
-        return __exchange2list(df)
+    if region is not None:
+        response = requests.get('https://api.nasdaq.com/api/screener/stocks', headers=headers, params=params_region(region))
+        text_data= response.text
+        json_dict= json.loads(text_data)
+        columns = list(json_dict['data']['headers'].keys())
+        df = pd.DataFrame(json_dict['data']['rows'], columns=columns)
+        return df
     else:
         raise ValueError('Please enter a valid region (use a Region.REGION as the argument, e.g. Region.AFRICA)')
 
 def __exchange2df(exchange):
-    response = requests.get('https://old.nasdaq.com/screening/companies-by-name.aspx', headers=headers, params=params(exchange))
-    data = io.StringIO(response.text)
-    df = pd.read_csv(data, sep=",")
+    response = requests.get('https://api.nasdaq.com/api/screener/stocks', headers=headers, params=params(exchange))
+    text_data= response.text
+    json_dict= json.loads(text_data)
+    columns = list(json_dict['data']['headers'].keys())
+    df = pd.DataFrame(json_dict['data']['rows'], columns=columns)
     return df
 
 def __exchange2list(exchange):
     df = __exchange2df(exchange)
     # removes weird tickers
-    df_filtered = df[~df['Symbol'].str.contains("\.|\^")]
-    return df_filtered['Symbol'].tolist()
+    df_filtered = df[~df['symbol'].str.contains("\.|\^")]
+    return df['symbol'].tolist()
 
 # market caps are in millions
 def __exchange2list_filtered(exchange, mktcap_min=None, mktcap_max=None, sectors=None):
     df = __exchange2df(exchange)
-    df = df.dropna(subset={'MarketCap'})
-    df = df[~df['Symbol'].str.contains("\.|\^")]
+    df = df.dropna(subset={'marketCap'})
+    df = df[~df['symbol'].str.contains("\.|\^")]
 
     if sectors is not None:
         if isinstance(sectors, str):
             sectors = [sectors]
         if not _SECTORS_LIST.issuperset(set(sectors)):
             raise ValueError('Some sectors included are invalid')
-        sector_filter = df['Sector'].apply(lambda x: x in sectors)
+        sector_filter = df['sector'].apply(lambda x: x in sectors)
         df = df[sector_filter]
 
     def cust_filter(mkt_cap):
-        if 'M' in mkt_cap:
-            return float(mkt_cap[1:-1])
-        elif 'B' in mkt_cap:
-            return float(mkt_cap[1:-1]) * 1000
-        else:
-            return float(mkt_cap[1:]) / 1e6
-    df['MarketCap'] = df['MarketCap'].apply(cust_filter)
+        if not mkt_cap:
+            return float(0.0)
+        return float(mkt_cap) / 1e6
+    df['marketCap'] = df['marketCap'].apply(cust_filter)
     if mktcap_min is not None:
-        df = df[df['MarketCap'] > mktcap_min]
+        df = df[df['marketCap'] > mktcap_min]
     if mktcap_max is not None:
-        df = df[df['MarketCap'] < mktcap_max]
-    return df['Symbol'].tolist()
+        df = df[df['marketCap'] < mktcap_max]
+    return df['symbol'].tolist()
 
 
 # save the tickers to a CSV
